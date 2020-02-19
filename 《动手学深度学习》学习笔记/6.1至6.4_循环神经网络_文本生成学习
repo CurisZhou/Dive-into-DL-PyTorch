@@ -1,5 +1,3 @@
-基于第六章循环神经网络从第一章到第四章的内容,利用pytorch中的网络层: 双向GRU网络,实现一个文本生成模型.
-
 ''''''
 
 '''6.3 语言模型数据集（周杰伦专辑歌词）'''
@@ -10,6 +8,7 @@ import torch.nn.functional as F
 import random
 import zipfile  # 用于打开zip压缩文件,并能读取zip压缩文件内的子文件的包
 from collections import Counter
+import math
 
 '''6.3.1 读取数据集'''
 
@@ -56,7 +55,7 @@ class Load_Data_jay_lyrics():
         # 的对应的索引号也就越小
         char_to_idx = dict([(char, idx) for idx, char in enumerate(idx_to_char)])
         self.char_to_idx = char_to_idx
-        vocab_size = len(self.corpus_chars)  # 语料库词典的大小
+        vocab_size = len(idx_to_char)  # 语料库词典的大小
 
         corpus_indices = [char_to_idx[char] for char in self.corpus_chars]
 
@@ -168,23 +167,26 @@ class GRU_Text_Generation(torch.nn.Module):
 
 
 # 接下来基于文本生成模型GRU_Text_Generation()定义文本生成函数. 以下函数基于前缀prefix（含有数个字符的字符串）来生成(预测)接下来的num_gene个字符
-def text_generation(prefix, num_gene, text_generation_model, idx_to_char, char_to_idx):
+def text_generation(prefix, num_gene, text_generation_model, idx_to_char, char_to_idx, device):
 
     # text_generation_model = text_generation_model
     # 文本生成模型text_generation_model(GRU_Text_Generation()类)变为测试模式
     text_generation_model.eval()
 
-    # 此时生成文本时,batch相当于1,而此处将输入的prefix的长度作为seq_len来生成下一个字符.
+    # 此时生成文本时,batch相当于1,而此处将设定的seq_len变量的值作为seq_len来生成下一个字符 (也可将输入的prefix的长度作为seq_len的值).
     # 下一个字符生成之后,再将新生成的字符纳入seq_len的末尾,从原先的seq_len的开头删去一个字符,保证seq_len长度不变再来生成下一个字符.
-    outputs = [char_to_idx[ prefix[0] ]]
-    # seq_len = len(outputs)
+    outputs = [ char_to_idx[ prefix[0] ]]  # 现在下一个字符的生成仅基于上一个字符,即seq_len设为1,因此outputs在此为: [ char_to_idx[ prefix[0] ]]
+    # outputs = [char_to_idx[char] for char in prefix]
+
+    seq_len = 1 # 此时seq_len设为1
+    # seq_len = len(prefix)
 
     # 生成num_gene个字符
     for i in range(num_gene + len(prefix) - 1):
-        # 将索引完最后1个元素的outputs变为一个二维张量,此时张量outputs的形状为: (batch,seq_len) --> (1, 1)
-        outputs_to_gru_inputs = torch.tensor(outputs[-1])
-        outputs_to_gru_inputs = outputs_to_gru_inputs.unsqueeze(dim=0)
-        print(outputs_to_gru_inputs.shape)
+    # for i in range(num_gene - 1):
+        # 将索引完元素的outputs[-seq_len:]变为一个二维张量,此时张量outputs_to_gru_inputs的形状为: (batch,seq_len) --> (1, seq_len)
+        # 必须用一个unsqueeze(0)才能将outputs[-seq_len:]变为一个二维张量
+        outputs_to_gru_inputs = torch.tensor(outputs[-seq_len:],device=device).unsqueeze(0)
 
         # 此时只需用到predict_output张量，predict_output张量的形状为: (batch, vocab_size) --> (1, vocab_size)
         final_outputs, predict_output = text_generation_model(outputs_to_gru_inputs)
@@ -231,6 +233,9 @@ def train_and_predict(epoch_num, batch_size, seq_len, embed_dim, enc_hid_dim, dr
         # 将模型变为训练模式,因为模型可能在上一个epoch的末尾变为测试模式用于生成文本
         text_generation_model.train()
 
+        # 计算困惑度: math.exp(loss_sum / n)
+        loss_sum, n = 0.0, 0
+
         for batch_x, batch_y in data_iter_random(corpus_indices=corpus_indices, batch_size=batch_size, seq_len=seq_len,device=device):
             # 此处的batch_x与batch_y都为形状为(batch_size, seq_len)的张量
             # 此时final_outputs张量的形状为: (batch, seq_len, vocab_size)
@@ -256,10 +261,15 @@ def train_and_predict(epoch_num, batch_size, seq_len, embed_dim, enc_hid_dim, dr
             grad_clipping(model=text_generation_model, device=device, theta=1e-2) # 梯度裁剪函数
             optimizer.step() # 梯度下降,参数更新
 
-        if (epoch + 1) % 2 == 0:
-            print("\nEpoch {}: ".format(epoch))
-            text_generation(prefix, num_gene, text_generation_model, idx_to_char, char_to_idx)
+            loss_sum += loss.item() * batch_y.shape[0]
+            n += batch_y.shape[0]
 
+        if (epoch + 1) % 5 == 0:
+            print("\nEpoch {}: ".format(epoch + 1))
+            print("困惑度: {}".format(math.exp(loss_sum / n)))
+            text_generation(prefix, num_gene, text_generation_model, idx_to_char, char_to_idx, device)
+
+        if (epoch + 1) % 15 == 0:
             optimizer.param_groups[0]["lr"] *= 0.1  # 将优化器学习率变为原先0.1倍
 
 
@@ -273,5 +283,5 @@ if __name__ == "__main__":
     #     print("batch x: ",batch_x)
     #     print("batch y: ",batch_y,"\n")
 
-    train_and_predict(epoch_num=4, batch_size=16, seq_len=9, embed_dim=100, enc_hid_dim=256, dropout_prob=0.8,
-                      text_generation_model=GRU_Text_Generation, prefix="想你", num_gene=27)
+    train_and_predict(epoch_num=30, batch_size=32, seq_len=36, embed_dim=200, enc_hid_dim=256, dropout_prob=0.5,
+                      text_generation_model=GRU_Text_Generation, prefix="想你的夜", num_gene=50)
